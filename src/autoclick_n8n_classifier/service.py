@@ -13,8 +13,9 @@ from typing import Any
 
 import joblib
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
@@ -295,7 +296,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/ratings")
     async def ratings(request: Request) -> dict[str, Any]:
-        payload = coerce_rating_payload(await request_payload(request))
+        try:
+            payload = coerce_rating_payload(await request_payload(request))
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
         result = insert_rating(active_settings, payload)
         return {**result, "rating": payload.rating, "job_id": payload.job_id}
 
@@ -351,4 +355,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

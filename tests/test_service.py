@@ -87,3 +87,16 @@ def test_rating_webhook_accepts_query_payload(tmp_path):
     rows = load_rating_rows(settings)
     assert rows[0]["rating"] == 1
     assert rows[0]["interested"] == 0
+
+
+def test_rating_endpoint_returns_422_for_missing_rating(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post("/ratings", json={"source": "telegram"})
+
+    assert response.status_code == 422
+    assert load_rating_rows(settings) == []
