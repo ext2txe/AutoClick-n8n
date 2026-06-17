@@ -100,3 +100,24 @@ def test_rating_endpoint_returns_422_for_missing_rating(tmp_path):
 
     assert response.status_code == 422
     assert load_rating_rows(settings) == []
+
+
+def test_rating_endpoint_accepts_stringified_raw_payload(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/ratings",
+        json={
+            "rating": 5,
+            "job_id": "n8n-stringified-raw",
+            "source": "telegram",
+            "raw_payload": "[object Object]",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["stored"] is True

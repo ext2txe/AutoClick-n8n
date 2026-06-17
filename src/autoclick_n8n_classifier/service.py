@@ -131,9 +131,14 @@ def open_db(settings: Settings) -> sqlite3.Connection:
 
 
 def coerce_rating_payload(values: dict[str, Any]) -> RatingIn:
-    clean = {key: value for key, value in values.items() if value is not None}
+    clean = {key: value for key, value in values.items() if key and value is not None}
     raw_payload = dict(clean)
-    clean.setdefault("raw_payload", raw_payload)
+    if isinstance(clean.get("raw_payload"), dict):
+        pass
+    elif "raw_payload" in clean:
+        clean["raw_payload"] = {"value": clean["raw_payload"]}
+    else:
+        clean["raw_payload"] = raw_payload
     return RatingIn.model_validate(clean)
 
 
