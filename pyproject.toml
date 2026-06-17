@@ -1,0 +1,27 @@
+[project]
+name = "autoclick-n8n-classifier"
+version = "0.1.0"
+description = "Rating capture and classifier service for AutoClick job feed filtering."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.135,<0.138",
+    "joblib>=1.5,<2",
+    "pydantic>=2.12,<3",
+    "scikit-learn>=1.8,<2",
+    "uvicorn[standard]>=0.40,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1,<10",
+]
+
+[project.scripts]
+autoclick-classifier = "autoclick_n8n_classifier.service:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
