@@ -50,6 +50,22 @@ class RatingIn(BaseModel):
     posted: str = ""
     country: str = ""
     description: str = ""
+    job_html: str = ""
+    job_text: str = ""
+    source: str = "n8n"
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class JobIn(BaseModel):
+    job_id: str = ""
+    job_file: str = ""
+    job_title: str = ""
+    job_url: str = ""
+    posted: str = ""
+    country: str = ""
+    description: str = ""
+    job_html: str = ""
+    job_text: str = ""
     source: str = "n8n"
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
@@ -58,6 +74,7 @@ class ClassifyIn(BaseModel):
     job_id: str = ""
     title: str = ""
     description: str = ""
+    job_text: str = ""
     country: str = ""
     url: str = ""
     html: str = ""
@@ -72,8 +89,17 @@ def normalize_text(value: str) -> str:
     return SPACE_RE.sub(" ", without_tags).strip()
 
 
+def derive_job_text(*values: str) -> str:
+    for value in values:
+        normalized = normalize_text(value)
+        if normalized:
+            return normalized
+    return ""
+
+
 def build_training_text(row: sqlite3.Row) -> str:
     fields = [
+        row["job_text"],
         row["job_title"],
         row["description"],
         row["country"],
@@ -90,6 +116,7 @@ def build_classification_text(payload: ClassifyIn) -> str:
         " ".join(
             [
                 payload.title,
+                payload.job_text,
                 payload.description,
                 payload.country,
                 payload.url,
@@ -118,6 +145,36 @@ def open_db(settings: Settings) -> sqlite3.Connection:
             posted TEXT NOT NULL,
             country TEXT NOT NULL,
             description TEXT NOT NULL,
+            job_html TEXT NOT NULL,
+            job_text TEXT NOT NULL,
+            source TEXT NOT NULL,
+            raw_payload TEXT NOT NULL
+        )
+        """
+    )
+    ensure_columns(
+        connection,
+        "ratings",
+        {
+            "job_html": "TEXT NOT NULL DEFAULT ''",
+            "job_text": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            job_file TEXT NOT NULL,
+            job_title TEXT NOT NULL,
+            job_url TEXT NOT NULL,
+            posted TEXT NOT NULL,
+            country TEXT NOT NULL,
+            description TEXT NOT NULL,
+            job_html TEXT NOT NULL,
+            job_text TEXT NOT NULL,
             source TEXT NOT NULL,
             raw_payload TEXT NOT NULL
         )
@@ -126,8 +183,44 @@ def open_db(settings: Settings) -> sqlite3.Connection:
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_ratings_job_id_created_at ON ratings(job_id, created_at)"
     )
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_job_id ON jobs(job_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_job_file ON jobs(job_file)")
     connection.commit()
     return connection
+
+
+def ensure_columns(connection: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:
+    existing_columns = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+    for column_name, column_definition in columns.items():
+        if column_name not in existing_columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+
+def find_stored_job(connection: sqlite3.Connection, job_id: str, job_file: str) -> sqlite3.Row | None:
+    if job_id:
+        row = connection.execute(
+            "SELECT * FROM jobs WHERE job_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if row is not None:
+            return row
+    if job_file:
+        return connection.execute(
+            "SELECT * FROM jobs WHERE job_file = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (job_file,),
+        ).fetchone()
+    return None
+
+
+def coalesce_payload_field(payload_value: str, stored_job: sqlite3.Row | None, field_name: str) -> str:
+    if payload_value:
+        return payload_value
+    if stored_job is None:
+        return ""
+    return str(stored_job[field_name] or "")
 
 
 def coerce_rating_payload(values: dict[str, Any]) -> RatingIn:
@@ -140,6 +233,18 @@ def coerce_rating_payload(values: dict[str, Any]) -> RatingIn:
     else:
         clean["raw_payload"] = raw_payload
     return RatingIn.model_validate(clean)
+
+
+def coerce_job_payload(values: dict[str, Any]) -> JobIn:
+    clean = {key: value for key, value in values.items() if key and value is not None}
+    raw_payload = dict(clean)
+    if isinstance(clean.get("raw_payload"), dict):
+        pass
+    elif "raw_payload" in clean:
+        clean["raw_payload"] = {"value": clean["raw_payload"]}
+    else:
+        clean["raw_payload"] = raw_payload
+    return JobIn.model_validate(clean)
 
 
 async def request_payload(request: Request) -> dict[str, Any]:
@@ -155,16 +260,92 @@ async def request_payload(request: Request) -> dict[str, Any]:
     return payload
 
 
+def upsert_job(settings: Settings, payload: JobIn) -> dict[str, Any]:
+    job_text = derive_job_text(payload.job_text, payload.job_html, payload.description)
+    now = utc_now()
+    with open_db(settings) as connection:
+        existing_job = find_stored_job(connection, payload.job_id, payload.job_file)
+        if existing_job is None:
+            cursor = connection.execute(
+                """
+                INSERT INTO jobs (
+                    created_at, updated_at, job_id, job_file, job_title, job_url,
+                    posted, country, description, job_html, job_text, source, raw_payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now,
+                    now,
+                    payload.job_id,
+                    payload.job_file,
+                    payload.job_title,
+                    payload.job_url,
+                    payload.posted,
+                    payload.country,
+                    payload.description,
+                    payload.job_html,
+                    job_text,
+                    payload.source,
+                    json.dumps(payload.raw_payload, sort_keys=True),
+                ),
+            )
+            job_row_id = int(cursor.lastrowid)
+            created = True
+        else:
+            job_row_id = int(existing_job["id"])
+            connection.execute(
+                """
+                UPDATE jobs
+                SET updated_at = ?, job_id = ?, job_file = ?, job_title = ?, job_url = ?,
+                    posted = ?, country = ?, description = ?, job_html = ?, job_text = ?,
+                    source = ?, raw_payload = ?
+                WHERE id = ?
+                """,
+                (
+                    now,
+                    payload.job_id or existing_job["job_id"],
+                    payload.job_file or existing_job["job_file"],
+                    payload.job_title or existing_job["job_title"],
+                    payload.job_url or existing_job["job_url"],
+                    payload.posted or existing_job["posted"],
+                    payload.country or existing_job["country"],
+                    payload.description or existing_job["description"],
+                    payload.job_html or existing_job["job_html"],
+                    job_text or existing_job["job_text"],
+                    payload.source,
+                    json.dumps(payload.raw_payload, sort_keys=True),
+                    job_row_id,
+                ),
+            )
+            created = False
+        connection.commit()
+    return {"stored": True, "job_row_id": job_row_id, "created": created, "job_id": payload.job_id}
+
+
 def insert_rating(settings: Settings, payload: RatingIn) -> dict[str, Any]:
     interested = int(payload.rating >= settings.interested_rating)
     with open_db(settings) as connection:
+        stored_job = find_stored_job(connection, payload.job_id, payload.job_file)
+        job_title = coalesce_payload_field(payload.job_title, stored_job, "job_title")
+        job_url = coalesce_payload_field(payload.job_url, stored_job, "job_url")
+        posted = coalesce_payload_field(payload.posted, stored_job, "posted")
+        country = coalesce_payload_field(payload.country, stored_job, "country")
+        description = coalesce_payload_field(payload.description, stored_job, "description")
+        job_html = coalesce_payload_field(payload.job_html, stored_job, "job_html")
+        job_text = derive_job_text(
+            payload.job_text,
+            job_html,
+            description,
+            "" if stored_job is None else str(stored_job["job_text"] or ""),
+        )
         cursor = connection.execute(
             """
             INSERT INTO ratings (
                 created_at, rating, interested, job_id, job_file, job_title,
-                job_url, posted, country, description, source, raw_payload
+                job_url, posted, country, description, job_html, job_text, source, raw_payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 utc_now(),
@@ -172,11 +353,13 @@ def insert_rating(settings: Settings, payload: RatingIn) -> dict[str, Any]:
                 interested,
                 payload.job_id,
                 payload.job_file,
-                payload.job_title,
-                payload.job_url,
-                payload.posted,
-                payload.country,
-                payload.description,
+                job_title,
+                job_url,
+                posted,
+                country,
+                description,
+                job_html,
+                job_text,
                 payload.source,
                 json.dumps(payload.raw_payload, sort_keys=True),
             ),
@@ -307,6 +490,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=422, detail=exc.errors()) from exc
         result = insert_rating(active_settings, payload)
         return {**result, "rating": payload.rating, "job_id": payload.job_id}
+
+    @app.post("/jobs")
+    async def jobs(request: Request) -> dict[str, Any]:
+        payload = coerce_job_payload(await request_payload(request))
+        return upsert_job(active_settings, payload)
 
     @app.post("/train")
     def train() -> dict[str, Any]:

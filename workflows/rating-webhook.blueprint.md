@@ -22,6 +22,8 @@ Expected query parameters from AutoClick:
 
 The current AutoClick code can send either a compact payload (`rating`, `job_file`, `job_id`) or the richer notification payload (`rating`, `job_file`, `job_title`, `job_url`, `posted`, `country`). The classifier accepts both.
 
+For best classification, store the full job HTML first with the `store-captured-job` workflow. Then this rating workflow only needs `rating` plus `job_id` or `job_file`; the classifier will attach the rating to the stored HTML/text.
+
 ## Transform
 
 Use a `Set` or `Code` node to produce:
@@ -68,4 +70,3 @@ Use `Respond to Webhook`.
   "message": "Rating stored. Thanks."
 }
 ```
-

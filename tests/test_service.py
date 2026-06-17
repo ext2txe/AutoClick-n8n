@@ -121,3 +121,36 @@ def test_rating_endpoint_accepts_stringified_raw_payload(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["stored"] is True
+
+
+def test_rating_uses_stored_job_html_when_rating_payload_is_thin(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    job_response = client.post(
+        "/jobs",
+        json={
+            "job_id": "html-job-1",
+            "job_file": "html-job-1.html",
+            "job_title": "Thin title",
+            "job_html": "<article><h1>Zapier migration</h1><p>Build Python n8n API automation.</p></article>",
+        },
+    )
+    rating_response = client.post(
+        "/ratings",
+        json={
+            "rating": 5,
+            "job_id": "html-job-1",
+            "source": "telegram",
+        },
+    )
+
+    rows = load_rating_rows(settings)
+
+    assert job_response.status_code == 200
+    assert rating_response.status_code == 200
+    assert "Build Python n8n API automation" in build_training_text(rows[0])
+    assert rows[0]["job_title"] == "Thin title"
