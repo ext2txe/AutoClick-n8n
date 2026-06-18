@@ -19,6 +19,17 @@ This project handles the next loop:
 
 ## Local Setup
 
+Linux:
+
+```bash
+python3.11 -m venv .venv
+./.venv/bin/python -m pip install -e .[dev]
+cp .env.example .env
+./.venv/bin/autoclick-classifier --host 127.0.0.1 --port 8765
+```
+
+Windows:
+
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -28,6 +39,40 @@ autoclick-classifier --host 127.0.0.1 --port 8765
 ```
 
 The service stores data under `./data` by default.
+
+## Linux systemd service
+
+On the Linux host, install the project into a virtual environment, then register it with `systemd`:
+
+```bash
+python3.11 -m venv .venv
+./.venv/bin/python -m pip install -e .
+cp .env.example .env
+sudo bash ./scripts/install-systemd-service.sh
+```
+
+The installer creates `/etc/systemd/system/autoclick-classifier.service`, starts it immediately, and enables it for boot. It runs the existing `autoclick-classifier` entrypoint from `./.venv/bin`.
+
+Common commands:
+
+```bash
+sudo systemctl status autoclick-classifier
+sudo journalctl -u autoclick-classifier -f
+sudo systemctl restart autoclick-classifier
+curl http://127.0.0.1:8765/health
+```
+
+Optional installer settings can be supplied as environment variables:
+
+```bash
+sudo env HOST=0.0.0.0 PORT=8765 SERVICE_USER=autoclick bash ./scripts/install-systemd-service.sh
+```
+
+To remove the service:
+
+```bash
+sudo bash ./scripts/uninstall-systemd-service.sh
+```
 
 ## API Contract
 
