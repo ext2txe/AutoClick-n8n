@@ -42,16 +42,19 @@ The service stores data under `./data` by default.
 
 ## Linux systemd service
 
-On the Linux host, install the project into a virtual environment, then register it with `systemd`:
+On the Linux host, start the 24/7 service with:
 
 ```bash
-python3.11 -m venv .venv
-./.venv/bin/python -m pip install -e .
-cp .env.example .env
-sudo bash ./scripts/install-systemd-service.sh
+bash ./scripts/startup.sh
 ```
 
-The installer creates `/etc/systemd/system/autoclick-classifier.service`, starts it immediately, and enables it for boot. It runs the existing `autoclick-classifier` entrypoint from `./.venv/bin`.
+The startup script creates `.venv` if needed, installs the project, creates `.env` from `.env.example` if missing, registers `/etc/systemd/system/autoclick-classifier.service`, starts it immediately, and enables it for boot. The service uses `Restart=always`, so it keeps running after terminal logout and is restarted by `systemd` if the Python process exits.
+
+To stop it:
+
+```bash
+bash ./scripts/shutdown.sh
+```
 
 Common commands:
 

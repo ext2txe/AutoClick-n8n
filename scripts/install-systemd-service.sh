@@ -54,6 +54,7 @@ cat >"$UNIT_PATH" <<EOF
 Description=AutoClick n8n job classifier API
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -63,7 +64,7 @@ WorkingDirectory=$(quote_systemd_value "$WORKING_DIRECTORY")
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-$(quote_systemd_value "$ENV_FILE")
 ExecStart=$(quote_systemd_value "$EXECUTABLE") --host ${HOST} --port ${PORT}
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]
