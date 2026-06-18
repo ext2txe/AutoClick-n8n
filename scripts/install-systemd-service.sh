@@ -12,6 +12,7 @@ APP_DIR="${APP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
 WORKING_DIRECTORY="${WORKING_DIRECTORY:-$APP_DIR}"
 ENV_FILE="${ENV_FILE:-$APP_DIR/.env}"
 EXECUTABLE="${EXECUTABLE:-$APP_DIR/.venv/bin/autoclick-classifier}"
+RUNNER="${RUNNER:-$APP_DIR/scripts/run-service.sh}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -28,7 +29,7 @@ if [[ -z "$SERVICE_GROUP" ]]; then
     SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 fi
 
-if [[ "$WORKING_DIRECTORY" =~ [[:space:]] || "$ENV_FILE" =~ [[:space:]] || "$EXECUTABLE" =~ [[:space:]] ]]; then
+if [[ "$WORKING_DIRECTORY" =~ [[:space:]] || "$ENV_FILE" =~ [[:space:]] || "$EXECUTABLE" =~ [[:space:]] || "$RUNNER" =~ [[:space:]] ]]; then
     cat >&2 <<EOF
 systemd service paths cannot contain spaces with this installer.
 
@@ -36,7 +37,13 @@ Resolved paths:
   WorkingDirectory=${WORKING_DIRECTORY}
   EnvironmentFile=${ENV_FILE}
   ExecStart=${EXECUTABLE}
+  Runner=${RUNNER}
 EOF
+    exit 1
+fi
+
+if [[ ! -f "$RUNNER" ]]; then
+    echo "Cannot find service runner ${RUNNER}." >&2
     exit 1
 fi
 
@@ -66,14 +73,21 @@ User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${WORKING_DIRECTORY}
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-${ENV_FILE}
-ExecStart=${EXECUTABLE} --host ${HOST} --port ${PORT}
+ExecStart=/bin/bash ${RUNNER} ${HOST} ${PORT}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+if command -v systemd-analyze >/dev/null 2>&1; then
+    if ! systemd-analyze verify "$UNIT_PATH"; then
+        echo "Generated unit file:" >&2
+        nl -ba "$UNIT_PATH" >&2
+        exit 1
+    fi
+fi
 
 systemctl daemon-reload
 systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
