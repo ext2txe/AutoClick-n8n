@@ -14,6 +14,7 @@ from typing import Any
 import joblib
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from pydantic import ValidationError
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -28,6 +29,7 @@ DEFAULT_MODEL_PATH = Path(os.environ.get("AUTOCLICK_CLASSIFIER_MODEL", "./data/j
 DEFAULT_MIN_SAMPLES = int(os.environ.get("AUTOCLICK_CLASSIFIER_MIN_SAMPLES", "25"))
 DEFAULT_THRESHOLD = float(os.environ.get("AUTOCLICK_CLASSIFIER_NOTIFY_THRESHOLD", "0.55"))
 DEFAULT_INTERESTED_RATING = int(os.environ.get("AUTOCLICK_CLASSIFIER_INTERESTED_RATING", "4"))
+APP_VERSION = "0.1.6"
 TAG_RE = re.compile(r"<[^>]+>")
 SPACE_RE = re.compile(r"\s+")
 
@@ -78,6 +80,10 @@ class ClassifyIn(BaseModel):
     country: str = ""
     url: str = ""
     html: str = ""
+
+
+class ReviewRatingIn(BaseModel):
+    rating: int = Field(ge=1, le=5)
 
 
 def utc_now() -> str:
@@ -369,6 +375,203 @@ def insert_rating(settings: Settings, payload: RatingIn) -> dict[str, Any]:
     return {"stored": True, "rating_id": rating_id, "interested": bool(interested)}
 
 
+def backfill_ratings_from_jobs(settings: Settings) -> dict[str, Any]:
+    checked = 0
+    matched = 0
+    updated = 0
+    unmatched = 0
+    with open_db(settings) as connection:
+        rows = list(
+            connection.execute(
+                """
+                SELECT * FROM ratings
+                WHERE job_html = '' OR job_text = '' OR job_title = '' OR job_url = ''
+                   OR posted = '' OR country = '' OR description = ''
+                ORDER BY created_at ASC, id ASC
+                """
+            )
+        )
+        for row in rows:
+            checked += 1
+            stored_job = find_stored_job(connection, str(row["job_id"] or ""), str(row["job_file"] or ""))
+            if stored_job is None:
+                unmatched += 1
+                continue
+            matched += 1
+
+            job_title = coalesce_payload_field(str(row["job_title"] or ""), stored_job, "job_title")
+            job_url = coalesce_payload_field(str(row["job_url"] or ""), stored_job, "job_url")
+            posted = coalesce_payload_field(str(row["posted"] or ""), stored_job, "posted")
+            country = coalesce_payload_field(str(row["country"] or ""), stored_job, "country")
+            description = coalesce_payload_field(str(row["description"] or ""), stored_job, "description")
+            job_html = coalesce_payload_field(str(row["job_html"] or ""), stored_job, "job_html")
+            job_text = derive_job_text(
+                str(row["job_text"] or ""),
+                job_html,
+                description,
+                str(stored_job["job_text"] or ""),
+            )
+            if (
+                job_title != row["job_title"]
+                or job_url != row["job_url"]
+                or posted != row["posted"]
+                or country != row["country"]
+                or description != row["description"]
+                or job_html != row["job_html"]
+                or job_text != row["job_text"]
+            ):
+                connection.execute(
+                    """
+                    UPDATE ratings
+                    SET job_title = ?, job_url = ?, posted = ?, country = ?,
+                        description = ?, job_html = ?, job_text = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        job_title,
+                        job_url,
+                        posted,
+                        country,
+                        description,
+                        job_html,
+                        job_text,
+                        int(row["id"]),
+                    ),
+                )
+                updated += 1
+        connection.commit()
+    return {
+        "checked": checked,
+        "matched": matched,
+        "updated": updated,
+        "unmatched": unmatched,
+    }
+
+
+def decode_json_object(value: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(value or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def latest_rating_for_job(connection: sqlite3.Connection, job: sqlite3.Row) -> sqlite3.Row | None:
+    job_id = str(job["job_id"] or "")
+    job_file = str(job["job_file"] or "")
+    return connection.execute(
+        """
+        SELECT * FROM ratings
+        WHERE (? != '' AND job_id = ?) OR (? != '' AND job_file = ?)
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (job_id, job_id, job_file, job_file),
+    ).fetchone()
+
+
+def review_job_summary(job: sqlite3.Row, latest_rating: sqlite3.Row | None) -> dict[str, Any]:
+    raw_payload = decode_json_object(str(job["raw_payload"] or "{}"))
+    return {
+        "id": int(job["id"]),
+        "job_id": str(job["job_id"] or ""),
+        "job_file": str(job["job_file"] or ""),
+        "job_title": str(job["job_title"] or ""),
+        "job_url": str(job["job_url"] or ""),
+        "posted": str(job["posted"] or ""),
+        "country": str(job["country"] or ""),
+        "description": str(job["description"] or ""),
+        "text_preview": str(job["job_text"] or "")[:500],
+        "source": str(job["source"] or ""),
+        "source_date": raw_payload.get("source_date", ""),
+        "source_bucket": raw_payload.get("source_bucket", ""),
+        "source_relative_path": raw_payload.get("source_relative_path", ""),
+        "source_path": raw_payload.get("source_path", ""),
+        "rating": None if latest_rating is None else int(latest_rating["rating"]),
+        "rating_id": None if latest_rating is None else int(latest_rating["id"]),
+        "rated_at": None if latest_rating is None else str(latest_rating["created_at"]),
+    }
+
+
+def review_jobs(settings: Settings, *, status: str = "unrated", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    with open_db(settings) as connection:
+        rows = list(
+            connection.execute(
+                """
+                SELECT * FROM jobs
+                ORDER BY updated_at DESC, id DESC
+                """
+            )
+        )
+        summaries: list[dict[str, Any]] = []
+        rated_count = 0
+        for row in rows:
+            latest_rating = latest_rating_for_job(connection, row)
+            if latest_rating is not None:
+                rated_count += 1
+            if status == "unrated" and latest_rating is not None:
+                continue
+            if status == "rated" and latest_rating is None:
+                continue
+            summaries.append(review_job_summary(row, latest_rating))
+        summaries.sort(
+            key=lambda item: (
+                str(item.get("source_relative_path") or item.get("job_file") or ""),
+                int(item.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return {
+            "status": status,
+            "total_jobs": len(rows),
+            "rated_jobs": rated_count,
+            "unrated_jobs": len(rows) - rated_count,
+            "offset": offset,
+            "limit": limit,
+            "jobs": summaries[offset : offset + limit],
+        }
+
+
+def get_review_job(settings: Settings, job_row_id: int) -> dict[str, Any]:
+    with open_db(settings) as connection:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_row_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_row_id)
+        summary = review_job_summary(row, latest_rating_for_job(connection, row))
+        return {
+            **summary,
+            "job_html": str(row["job_html"] or ""),
+            "job_text": str(row["job_text"] or ""),
+            "raw_payload": decode_json_object(str(row["raw_payload"] or "{}")),
+        }
+
+
+def rate_review_job(settings: Settings, job_row_id: int, rating: int) -> dict[str, Any]:
+    with open_db(settings) as connection:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_row_id,)).fetchone()
+        if row is None:
+            raise KeyError(job_row_id)
+    return insert_rating(
+        settings,
+        RatingIn(
+            rating=rating,
+            job_id=str(row["job_id"] or ""),
+            job_file=str(row["job_file"] or ""),
+            job_title=str(row["job_title"] or ""),
+            job_url=str(row["job_url"] or ""),
+            posted=str(row["posted"] or ""),
+            country=str(row["country"] or ""),
+            description=str(row["description"] or ""),
+            job_html=str(row["job_html"] or ""),
+            job_text=str(row["job_text"] or ""),
+            source="review-app",
+            raw_payload={"review_job_row_id": job_row_id},
+        ),
+    )
+
+
 def load_rating_rows(settings: Settings) -> list[sqlite3.Row]:
     with open_db(settings) as connection:
         return list(connection.execute("SELECT * FROM ratings ORDER BY created_at ASC, id ASC"))
@@ -508,7 +711,7 @@ def classify_job(settings: Settings, payload: ClassifyIn) -> dict[str, Any]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     active_settings = settings or Settings()
-    app = FastAPI(title="AutoClick n8n Job Classifier", version="0.1.0")
+    app = FastAPI(title="AutoClick n8n Job Classifier", version=APP_VERSION)
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -536,9 +739,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def train() -> dict[str, Any]:
         return train_model(active_settings)
 
+    @app.post("/backfill-ratings")
+    def backfill_ratings() -> dict[str, Any]:
+        result = backfill_ratings_from_jobs(active_settings)
+        return {**result, "payload_stats": payload_stats(active_settings)}
+
     @app.post("/classify")
     def classify(payload: ClassifyIn) -> dict[str, Any]:
         return classify_job(active_settings, payload)
+
+    @app.get("/review", response_class=HTMLResponse)
+    def review_page() -> HTMLResponse:
+        return HTMLResponse(REVIEW_APP_HTML)
+
+    @app.get("/review/jobs")
+    def review_jobs_endpoint(status: str = "unrated", limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        if status not in {"unrated", "rated", "all"}:
+            raise HTTPException(status_code=400, detail="status must be unrated, rated, or all")
+        return review_jobs(active_settings, status=status, limit=limit, offset=offset)
+
+    @app.get("/review/jobs/{job_row_id}")
+    def review_job_endpoint(job_row_id: int) -> dict[str, Any]:
+        try:
+            return get_review_job(active_settings, job_row_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+
+    @app.post("/review/jobs/{job_row_id}/rating")
+    def review_job_rating_endpoint(job_row_id: int, payload: ReviewRatingIn) -> dict[str, Any]:
+        try:
+            result = rate_review_job(active_settings, job_row_id, payload.rating)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="job not found") from exc
+        return {**result, "review_job_row_id": job_row_id}
 
     @app.get("/metrics")
     def metrics() -> dict[str, Any]:
@@ -561,6 +794,132 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     return app
+
+
+REVIEW_APP_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AutoClick Review</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #101418; color: #ecf2f8; }
+    header { display: flex; gap: 12px; align-items: center; padding: 12px 16px; border-bottom: 1px solid #2b3742; background: #151b22; position: sticky; top: 0; z-index: 2; }
+    h1 { font-size: 18px; margin: 0; }
+    button, select { background: #24313c; color: #ecf2f8; border: 1px solid #40505f; border-radius: 6px; padding: 7px 10px; }
+    button:hover { background: #314150; }
+    button.rating { min-width: 38px; font-weight: 700; }
+    button.low { border-color: #7b3c42; }
+    button.high { border-color: #357a55; }
+    main { display: grid; grid-template-columns: minmax(420px, 1fr) minmax(360px, 42vw); min-height: calc(100vh - 54px); }
+    #list { border-right: 1px solid #2b3742; overflow: auto; }
+    #details { overflow: auto; padding: 16px; background: #0d1116; }
+    .job { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #25313b; }
+    .job.active { background: #17212b; }
+    .title { font-weight: 700; margin-bottom: 5px; }
+    .meta, .preview { color: #aebdca; font-size: 13px; }
+    .actions { display: flex; gap: 6px; align-items: start; }
+    .pill { display: inline-block; margin-right: 6px; padding: 2px 6px; border: 1px solid #40505f; border-radius: 999px; font-size: 12px; color: #c9d5df; }
+    iframe { width: 100%; height: 70vh; border: 1px solid #2b3742; background: white; }
+    pre { white-space: pre-wrap; color: #dce7ef; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } #details { min-height: 60vh; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Job Review</h1>
+    <select id="status">
+      <option value="unrated">Unrated</option>
+      <option value="all">All</option>
+      <option value="rated">Rated</option>
+    </select>
+    <button id="refresh">Refresh</button>
+    <span id="counts"></span>
+  </header>
+  <main>
+    <section id="list"></section>
+    <section id="details"><p>Select a job for details. Use 1-5 keys to rate the selected job.</p></section>
+  </main>
+  <script>
+    let jobs = [];
+    let selectedId = null;
+
+    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+
+    async function loadJobs() {
+      const status = document.getElementById('status').value;
+      const response = await fetch(`/review/jobs?status=${encodeURIComponent(status)}&limit=300`);
+      const data = await response.json();
+      jobs = data.jobs;
+      document.getElementById('counts').textContent = `${data.unrated_jobs} unrated / ${data.total_jobs} imported`;
+      renderJobs();
+    }
+
+    function renderJobs() {
+      const list = document.getElementById('list');
+      list.innerHTML = jobs.map(job => `
+        <article class="job ${job.id === selectedId ? 'active' : ''}" data-id="${job.id}">
+          <div onclick="selectJob(${job.id})">
+            <div class="title">${esc(job.job_title || job.job_file)}</div>
+            <div class="meta">
+              <span class="pill">${esc(job.source_date || '?')}</span>
+              <span class="pill">${esc(job.source_bucket || '')}</span>
+              ${esc(job.country || '')} ${esc(job.posted || '')}
+            </div>
+            <div class="preview">${esc(job.text_preview || '')}</div>
+          </div>
+          <div class="actions">
+            ${[1,2,3,4,5].map(r => `<button class="rating ${r >= 4 ? 'high' : 'low'}" onclick="rateJob(${job.id}, ${r})">${r}</button>`).join('')}
+          </div>
+        </article>
+      `).join('');
+    }
+
+    async function selectJob(id) {
+      selectedId = id;
+      renderJobs();
+      const response = await fetch(`/review/jobs/${id}`);
+      const job = await response.json();
+      document.getElementById('details').innerHTML = `
+        <h2>${esc(job.job_title || job.job_file)}</h2>
+        <p>
+          <span class="pill">${esc(job.source_date || '?')}</span>
+          <span class="pill">${esc(job.source_bucket || '')}</span>
+          <span class="pill">${esc(job.country || '')}</span>
+          <span class="pill">${esc(job.posted || '')}</span>
+        </p>
+        <p>${job.job_url ? `<a href="${esc(job.job_url)}" target="_blank" rel="noreferrer">Open Upwork</a>` : ''}</p>
+        <div class="actions">${[1,2,3,4,5].map(r => `<button class="rating ${r >= 4 ? 'high' : 'low'}" onclick="rateJob(${job.id}, ${r})">${r}</button>`).join('')}</div>
+        <h3>Text</h3>
+        <pre>${esc(job.job_text || '')}</pre>
+        <h3>HTML</h3>
+        <iframe sandbox srcdoc="${esc(job.job_html || '')}"></iframe>
+      `;
+    }
+
+    async function rateJob(id, rating) {
+      await fetch(`/review/jobs/${id}/rating`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({rating})
+      });
+      jobs = jobs.filter(job => job.id !== id || document.getElementById('status').value !== 'unrated');
+      selectedId = null;
+      renderJobs();
+      document.getElementById('details').innerHTML = `<p>Rated ${rating}. Select the next job.</p>`;
+    }
+
+    document.getElementById('status').addEventListener('change', loadJobs);
+    document.getElementById('refresh').addEventListener('click', loadJobs);
+    document.addEventListener('keydown', event => {
+      if (!selectedId || !/^[1-5]$/.test(event.key)) return;
+      rateJob(selectedId, Number(event.key));
+    });
+    loadJobs();
+  </script>
+</body>
+</html>"""
 
 
 app = create_app()

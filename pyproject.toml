@@ -1,6 +1,6 @@
 [project]
 name = "autoclick-n8n-classifier"
-version = "0.1.4"
+version = "0.1.6"
 description = "Rating capture and classifier service for AutoClick job feed filtering."
 requires-python = ">=3.11"
 dependencies = [

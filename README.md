@@ -157,6 +157,61 @@ The service extracts normalized plain text from `job_html` and stores it as `job
 }
 ```
 
+### Import historical job HTML
+
+Use this when you already have datestamped `job.html` files and want the classifier to learn from their full content.
+
+The importer understands dated folders like:
+
+```text
+20260612/prospects/064038_022065160614482733821.html
+```
+
+It stores `source_date`, `source_bucket`, and `source_relative_path` in `raw_payload` so the review queue can show where each job came from.
+
+First import the historical HTML files into `/jobs`:
+
+```bash
+python3 scripts/import-job-html.py /path/to/jobs-folder --endpoint http://127.0.0.1:8765/jobs
+```
+
+Preview without writing:
+
+```bash
+python3 scripts/import-job-html.py /path/to/jobs-folder --dry-run --limit 10
+```
+
+Then attach any existing thin rating rows to the matching stored job HTML/text:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/backfill-ratings | python3 -m json.tool
+```
+
+Finally retrain:
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/train | python3 -m json.tool
+```
+
+The import matches by `job_id` when available, otherwise by `job_file`. Existing ratings that were stored before HTML capture need the `backfill-ratings` step before retraining.
+
+### Review imported jobs
+
+Open the lightweight review UI in a browser:
+
+```text
+http://<server-host>:8765/review
+```
+
+The review page is optimized for fast triage:
+
+- Rate obvious jobs directly from the summary list with buttons `1` to `5`
+- Select a borderline job to view full text and rendered HTML
+- Use keyboard keys `1` to `5` to rate the selected job
+- The default queue shows only unrated imported jobs
+
+The review app stores ratings through the same classifier rating path, with `source` set to `review-app`.
+
 ### Train the classifier
 
 `POST /train`

@@ -2,6 +2,7 @@ from autoclick_n8n_classifier.service import (
     ClassifyIn,
     RatingIn,
     Settings,
+    backfill_ratings_from_jobs,
     build_classification_text,
     build_training_text,
     insert_rating,
@@ -190,3 +191,113 @@ def test_metrics_reports_payload_coverage(tmp_path):
     assert metrics["payload_stats"]["jobs"]["with_raw_payload"] == 1
     assert metrics["payload_stats"]["ratings"]["with_text"] == 1
     assert metrics["payload_stats"]["ratings"]["with_raw_payload"] == 1
+
+
+def test_backfill_existing_rating_from_stored_job_html(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    rating_response = client.post(
+        "/ratings",
+        json={
+            "rating": 5,
+            "job_file": "historical-job.html",
+            "source": "telegram",
+        },
+    )
+    job_response = client.post(
+        "/jobs",
+        json={
+            "job_file": "historical-job.html",
+            "job_title": "Historical automation job",
+            "job_html": "<article><p>Need a Python n8n workflow imported from old HTML.</p></article>",
+        },
+    )
+
+    result = backfill_ratings_from_jobs(settings)
+    rows = load_rating_rows(settings)
+
+    assert rating_response.status_code == 200
+    assert job_response.status_code == 200
+    assert result["checked"] == 1
+    assert result["matched"] == 1
+    assert result["updated"] == 1
+    assert "Python n8n workflow imported from old HTML" in build_training_text(rows[0])
+
+
+def test_backfill_endpoint_reports_payload_stats(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    client.post("/ratings", json={"rating": 5, "job_file": "endpoint-backfill.html"})
+    client.post(
+        "/jobs",
+        json={
+            "job_file": "endpoint-backfill.html",
+            "job_html": "<article><p>Endpoint backfill text.</p></article>",
+        },
+    )
+
+    response = client.post("/backfill-ratings")
+
+    assert response.status_code == 200
+    assert response.json()["updated"] == 1
+    assert response.json()["payload_stats"]["ratings"]["with_text"] == 1
+
+
+def test_review_queue_rates_imported_job(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    client.post(
+        "/jobs",
+        json={
+            "job_id": "022065160614482733821",
+            "job_file": "064038_022065160614482733821.html",
+            "job_title": "Review queue automation job",
+            "country": "United Kingdom",
+            "job_html": "<article><p>Need n8n workflow support.</p></article>",
+            "raw_payload": {
+                "source_date": "20260612",
+                "source_bucket": "prospects",
+                "source_relative_path": "20260612/prospects/064038_022065160614482733821.html",
+            },
+        },
+    )
+
+    queue_response = client.get("/review/jobs")
+    job = queue_response.json()["jobs"][0]
+    rating_response = client.post(f"/review/jobs/{job['id']}/rating", json={"rating": 2})
+    updated_queue_response = client.get("/review/jobs")
+    rows = load_rating_rows(settings)
+
+    assert queue_response.status_code == 200
+    assert job["source_date"] == "20260612"
+    assert job["source_bucket"] == "prospects"
+    assert rating_response.status_code == 200
+    assert rating_response.json()["rating_id"] == rows[0]["id"]
+    assert updated_queue_response.json()["unrated_jobs"] == 0
+    assert rows[0]["rating"] == 2
+    assert rows[0]["job_text"] == "Need n8n workflow support."
+
+
+def test_review_page_loads(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    response = client.get("/review")
+
+    assert response.status_code == 200
+    assert "Job Review" in response.text
