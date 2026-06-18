@@ -374,10 +374,42 @@ def load_rating_rows(settings: Settings) -> list[sqlite3.Row]:
         return list(connection.execute("SELECT * FROM ratings ORDER BY created_at ASC, id ASC"))
 
 
+def table_payload_stats(connection: sqlite3.Connection, table_name: str) -> dict[str, Any]:
+    row = connection.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN length(job_html) > 0 THEN 1 ELSE 0 END) AS with_html,
+            SUM(CASE WHEN length(job_text) > 0 THEN 1 ELSE 0 END) AS with_text,
+            SUM(CASE WHEN length(raw_payload) > 0 AND raw_payload != '{{}}' THEN 1 ELSE 0 END) AS with_raw_payload,
+            ROUND(AVG(length(job_text)), 1) AS avg_job_text_length,
+            ROUND(AVG(length(raw_payload)), 1) AS avg_raw_payload_length
+        FROM {table_name}
+        """
+    ).fetchone()
+    return {
+        "total": int(row["total"] or 0),
+        "with_html": int(row["with_html"] or 0),
+        "with_text": int(row["with_text"] or 0),
+        "with_raw_payload": int(row["with_raw_payload"] or 0),
+        "avg_job_text_length": float(row["avg_job_text_length"] or 0),
+        "avg_raw_payload_length": float(row["avg_raw_payload_length"] or 0),
+    }
+
+
+def payload_stats(settings: Settings) -> dict[str, Any]:
+    with open_db(settings) as connection:
+        return {
+            "ratings": table_payload_stats(connection, "ratings"),
+            "jobs": table_payload_stats(connection, "jobs"),
+        }
+
+
 def train_model(settings: Settings) -> dict[str, Any]:
     rows = load_rating_rows(settings)
     labels = [int(row["interested"]) for row in rows]
     class_counts = {"low_interest": labels.count(0), "interested": labels.count(1)}
+    training_data_stats = payload_stats(settings)
     if len(rows) < settings.min_samples:
         return {
             "trained": False,
@@ -385,6 +417,7 @@ def train_model(settings: Settings) -> dict[str, Any]:
             "sample_count": len(rows),
             "min_samples": settings.min_samples,
             "class_counts": class_counts,
+            "training_data_stats": training_data_stats,
         }
     if len(set(labels)) < 2:
         return {
@@ -393,6 +426,7 @@ def train_model(settings: Settings) -> dict[str, Any]:
             "sample_count": len(rows),
             "min_samples": settings.min_samples,
             "class_counts": class_counts,
+            "training_data_stats": training_data_stats,
         }
 
     texts = [build_training_text(row) for row in rows]
@@ -427,6 +461,7 @@ def train_model(settings: Settings) -> dict[str, Any]:
             "class_counts": class_counts,
             "interested_rating": settings.interested_rating,
             "accuracy": accuracy,
+            "training_data_stats": training_data_stats,
         },
         settings.model_path,
     )
@@ -436,6 +471,7 @@ def train_model(settings: Settings) -> dict[str, Any]:
         "class_counts": class_counts,
         "accuracy": accuracy,
         "model_path": str(settings.model_path),
+        "training_data_stats": training_data_stats,
     }
 
 
@@ -520,6 +556,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "accuracy": None if model_bundle is None else model_bundle.get("accuracy"),
             "threshold": active_settings.notify_threshold,
             "min_samples": active_settings.min_samples,
+            "payload_stats": payload_stats(active_settings),
+            "model_training_data_stats": None if model_bundle is None else model_bundle.get("training_data_stats"),
         }
 
     return app

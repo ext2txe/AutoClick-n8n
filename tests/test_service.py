@@ -154,3 +154,39 @@ def test_rating_uses_stored_job_html_when_rating_payload_is_thin(tmp_path):
     assert rating_response.status_code == 200
     assert "Build Python n8n API automation" in build_training_text(rows[0])
     assert rows[0]["job_title"] == "Thin title"
+
+
+def test_metrics_reports_payload_coverage(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "ratings.db",
+        model_path=tmp_path / "model.joblib",
+    )
+    client = TestClient(create_app(settings))
+
+    job_response = client.post(
+        "/jobs",
+        json={
+            "job_id": "coverage-job-1",
+            "job_file": "coverage-job-1.html",
+            "job_html": "<article><p>Python automation with n8n.</p></article>",
+            "raw_payload": {"source_event": "capture"},
+        },
+    )
+    rating_response = client.post(
+        "/ratings",
+        json={
+            "rating": 5,
+            "job_id": "coverage-job-1",
+            "raw_payload": {"source_event": "rating-click"},
+        },
+    )
+    metrics_response = client.get("/metrics")
+
+    assert job_response.status_code == 200
+    assert rating_response.status_code == 200
+    assert metrics_response.status_code == 200
+    metrics = metrics_response.json()
+    assert metrics["payload_stats"]["jobs"]["with_html"] == 1
+    assert metrics["payload_stats"]["jobs"]["with_raw_payload"] == 1
+    assert metrics["payload_stats"]["ratings"]["with_text"] == 1
+    assert metrics["payload_stats"]["ratings"]["with_raw_payload"] == 1

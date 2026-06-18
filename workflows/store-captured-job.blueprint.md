@@ -28,7 +28,12 @@ Expected JSON body:
   "posted": "10 minutes ago",
   "country": "United Kingdom",
   "job_html": "<html>...</html>",
-  "source": "autoclick"
+  "source": "autoclick",
+  "raw_payload": {
+    "job_id": "012345678901234",
+    "job_file": "20260616103000_012345678901234.html",
+    "captured_at": "2026-06-18T06:00:00Z"
+  }
 }
 ```
 
@@ -37,7 +42,7 @@ Expected JSON body:
 Use an `HTTP Request` node.
 
 - Method: `POST`
-- URL: `http://172.17.0.1:8765/jobs` when n8n runs in Docker on the Linux host
+- URL: `http://172.18.0.1:8765/jobs` when n8n runs in Docker on the Linux host
 - Body content type: JSON
 - Body: webhook JSON body
 
@@ -53,4 +58,3 @@ Return:
   "message": "Job stored"
 }
 ```
-

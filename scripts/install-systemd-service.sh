@@ -91,7 +91,8 @@ fi
 
 systemctl daemon-reload
 systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
-systemctl enable --now "$SERVICE_NAME"
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 cat <<EOF
 Installed and started ${SERVICE_NAME}.
@@ -99,5 +100,5 @@ Installed and started ${SERVICE_NAME}.
 Useful commands:
   sudo systemctl status ${SERVICE_NAME}
   sudo journalctl -u ${SERVICE_NAME} -f
-  curl http://${HOST}:${PORT}/health
+  curl http://127.0.0.1:${PORT}/health
 EOF

@@ -65,6 +65,24 @@ sudo systemctl restart autoclick-classifier
 curl http://127.0.0.1:8765/health
 ```
 
+Confirm the service is running 24/7:
+
+```bash
+systemctl is-active autoclick-classifier
+systemctl is-enabled autoclick-classifier
+curl http://127.0.0.1:8765/health
+sudo systemctl cat autoclick-classifier
+```
+
+Expected checks:
+
+```text
+active
+enabled
+```
+
+The unit definition should include `Restart=always` and `WantedBy=multi-user.target`.
+
 Optional installer settings can be supplied as environment variables:
 
 ```bash
@@ -94,7 +112,11 @@ sudo bash ./scripts/uninstall-systemd-service.sh
   "country": "United Kingdom",
   "job_html": "<article>...</article>",
   "job_text": "Optional pre-extracted plain text from the job HTML.",
-  "source": "telegram"
+  "source": "telegram",
+  "raw_payload": {
+    "rating": "5",
+    "job_file": "20260616103000_012345678901234.html"
+  }
 }
 ```
 
@@ -117,7 +139,11 @@ Use this when the feed processor captures a job, before or around the time it se
   "posted": "10 minutes ago",
   "country": "United Kingdom",
   "job_html": "<html>...</html>",
-  "source": "autoclick"
+  "source": "autoclick",
+  "raw_payload": {
+    "job_id": "012345678901234",
+    "job_file": "20260616103000_012345678901234.html"
+  }
 }
 ```
 
@@ -210,3 +236,16 @@ Use `/metrics` to decide when the model is ready to join the feed processor:
 - `sample_count` should be comfortably above the minimum
 - both classes must have enough examples
 - test classifications should agree with your judgement before enabling suppression
+
+Use the payload coverage fields in `/metrics` to confirm n8n is sending the expected data:
+
+```bash
+curl -s http://127.0.0.1:8765/metrics | python3 -m json.tool
+```
+
+Check:
+
+- `payload_stats.ratings.with_raw_payload` increases after rating clicks
+- `payload_stats.jobs.with_html` and `payload_stats.jobs.with_text` increase after captured jobs are stored
+- `payload_stats.ratings.with_text` increases when ratings are attached to stored job HTML/text
+- `model_training_data_stats` is populated after the next `/train` call and shows the coverage used by the saved model
