@@ -14,13 +14,6 @@ ENV_FILE="${ENV_FILE:-$APP_DIR/.env}"
 EXECUTABLE="${EXECUTABLE:-$APP_DIR/.venv/bin/autoclick-classifier}"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 
-quote_systemd_value() {
-    local value="$1"
-    value="${value//\\/\\\\}"
-    value="${value//\"/\\\"}"
-    printf '"%s"' "$value"
-}
-
 if [[ "${EUID}" -ne 0 ]]; then
     echo "Run this installer with sudo so it can write ${UNIT_PATH}." >&2
     exit 1
@@ -33,6 +26,18 @@ fi
 
 if [[ -z "$SERVICE_GROUP" ]]; then
     SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
+fi
+
+if [[ "$WORKING_DIRECTORY" =~ [[:space:]] || "$ENV_FILE" =~ [[:space:]] || "$EXECUTABLE" =~ [[:space:]] ]]; then
+    cat >&2 <<EOF
+systemd service paths cannot contain spaces with this installer.
+
+Resolved paths:
+  WorkingDirectory=${WORKING_DIRECTORY}
+  EnvironmentFile=${ENV_FILE}
+  ExecStart=${EXECUTABLE}
+EOF
+    exit 1
 fi
 
 if [[ ! -x "$EXECUTABLE" ]]; then
@@ -54,16 +59,15 @@ cat >"$UNIT_PATH" <<EOF
 Description=AutoClick n8n job classifier API
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
-WorkingDirectory=$(quote_systemd_value "$WORKING_DIRECTORY")
+WorkingDirectory=${WORKING_DIRECTORY}
 Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-$(quote_systemd_value "$ENV_FILE")
-ExecStart=$(quote_systemd_value "$EXECUTABLE") --host ${HOST} --port ${PORT}
+EnvironmentFile=-${ENV_FILE}
+ExecStart=${EXECUTABLE} --host ${HOST} --port ${PORT}
 Restart=always
 RestartSec=5
 
@@ -72,6 +76,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
+systemctl reset-failed "$SERVICE_NAME" 2>/dev/null || true
 systemctl enable --now "$SERVICE_NAME"
 
 cat <<EOF
